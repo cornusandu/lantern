@@ -22,13 +22,14 @@ class Parameter:
     def __init__(self, dim: Optional[tuple] = None, vals: Optional[np.ndarray] = None, dtype=np.float32):
         if not dim and vals is None:
             raise ValueError("Please specify a shape or parse a list of values.")
-        self.dim = dim or vals.shape
         self.vals = vals if vals is not None else np.zeros(shape=dim, dtype=dtype)
-        self._grads = [list() for i in self.vals]
+        self.dtype = dtype
+        # one history list per flattened element
+        self._grads = [[] for _ in range(self.vals.size)]
 
-    def to(self, dtype = np.float32):
-        vals = self.vals.copy()
-        self.vals = np.array(vals, dtype)
+    def to(self, dtype=np.float32):
+        self.vals = self.vals.astype(dtype)
+        self.dtype = dtype
 
     def __getitem__(self, item):
         return self.vals[item]
@@ -65,22 +66,62 @@ class Parameter:
         return self
 
     def add_grad(self, loss: np.float32):
-        for i, v in enumerate(self.vals):
-            self._grads[i].append((v, loss))
+        # record (value, loss) for each scalar, in flat order
+        flat_vals = self.vals.ravel()
+        for idx, v in enumerate(flat_vals):
+            self._grads[idx].append((float(v), loss))
 
-    def grad(self, dtype = np.float32) -> np.ndarray:
+    def grad(self, dtype=np.float32) -> np.ndarray:
+        """
+        Estimează gradientul pentru fiecare element din self.vals
+        folosind metoda diferenței finite pe ultimele două valori din istoric.
+
+        Istoricul self._grads este o listă de liste, unde fiecare sub-listă conține
+        perechi (valoare_parametru, pierdere). Păstrăm doar ultimele 2 pentru a calcula
+        panta locală: (l_cur - l_prev) / (w_cur - w_prev).
+        """
         grads = np.zeros_like(self.vals, dtype=dtype)
-        for i, grad_history in enumerate(self._grads):
-            if len(grad_history) < 2:
-                grads[i] = 0.0
+        # self._grads este o listă de sub-liste corespunzătoare fiecărui element din self.vals
+        for idx, hist in enumerate(self._grads):
+            if len(hist) < 2:
+                # nu avem suficiente puncte pentru a estima derivata
+                grads.flat[idx] = 0.0
             else:
-                w_vals = np.array([float(w) for w, _ in grad_history], dtype=dtype)
-                l_vals = np.array([l for _, l in grad_history], dtype=dtype)
-                # Fit linear regression: loss = a * w + b
-                A = np.vstack([w_vals, np.ones(w_vals.shape[0], dtype=dtype)]).T
-                a, _ = np.linalg.lstsq(A, l_vals, rcond=None)[0]
-                grads[i] = a  # slope = dL/dw
+                # luăm ultimele două puncte
+                (w_prev, l_prev), (w_cur, l_cur) = hist[-2], hist[-1]
+                denom = w_cur - w_prev
+                # dacă diferența în parametru este zero, asumăm gradient nul
+                grads.flat[idx] = (l_cur - l_prev) / denom if denom != 0 else 0.0
         return grads
+
+    def _grad_old(self, dtype=None) -> np.ndarray:
+        dtype = dtype or self.dtype
+        grads_flat = np.zeros(self.vals.size, dtype=dtype)
+
+        for idx, hist in enumerate(self._grads):
+            if len(hist) < 2:
+                grads_flat[idx] = 0.0
+            else:
+                try:
+                    # Convertim temporar la float32 dacă e float16 (incompatibil cu lstsq)
+                    safe_dtype = np.float32 if dtype == np.float16 else dtype
+                    w_vals = np.array([w for w, _ in hist], dtype=safe_dtype)
+                    l_vals = np.array([l for _, l in hist], dtype=safe_dtype)
+
+                    if np.any(np.isnan(w_vals)) or np.any(np.isinf(w_vals)) or \
+                            np.any(np.isnan(l_vals)) or np.any(np.isinf(l_vals)):
+                        grads_flat[idx] = 0.0
+                        continue
+
+                    A = np.vstack([w_vals, np.ones_like(w_vals)]).T
+                    result = np.linalg.lstsq(A, l_vals, rcond=None)[0]
+                    a = result[0]
+
+                    grads_flat[idx] = a.astype(dtype)  # convertim înapoi dacă e nevoie
+                except np.linalg.LinAlgError:
+                    grads_flat[idx] = 0.0
+
+        return grads_flat.reshape(self.vals.shape)
 
 class ModuleList:
     def __init__(self, *modules):
@@ -192,9 +233,11 @@ class SGD(Optim):
         parameters (list[Parameter]): List of model parameters to optimize.
         lr (float): Learning rate.
     """
-    def __init__(self, parameters, lr: float = 0.01):
+    def __init__(self, parameters, lr: float = 0.01, maximize: bool = False):
         self.parameters = list(parameters)
         self.lr = lr
+        self.maxim = maximize
+        self.sign = -1 if maximize else 1
         self.dtype = np.float32
 
     def to(self, dtype = np.float32):
@@ -211,9 +254,7 @@ class SGD(Optim):
             # Compute current gradient for this parameter
             grad = p.grad(self.dtype)
             # Update parameters in-place
-            p.vals += self.lr * grad
-            # Reset history of (value, loss) pairs
-            #p._grads = [[] for _ in p.vals]
+            p.vals -= self.lr * grad * self.sign
 
     def zero_grad(self):
         """
