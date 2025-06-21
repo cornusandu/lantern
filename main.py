@@ -6,13 +6,13 @@ l = Sequential(
     Linear(6, 1),
     Linear(1, 1)
 )
-#l.to(np.float16)
+l.to(np.float64)
 gs = GradScheduler(l.parameters(), 2)
 
-optim = SGD(l.parameters(), lr = 0.0001)
+optim = SGD(l.parameters(), lr = 0.01, maximize=False)
 #optim.to(np.float64)
-for i in range(1000000):
-    v = l(np.random.uniform(-10, 10, (3,)))
+for i in range(15):
+    v = l(np.array([2, 3, 4]))
     y = np.array([15])
     loss = MSELoss(v, y)
     l.add_grad(loss)
