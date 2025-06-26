@@ -1,5 +1,4 @@
 import numpy as np
-import cupy as cp
 from typing import Optional
 from scipy.interpolate import CubicSpline
 from sklearn.linear_model import LinearRegression
@@ -265,6 +264,13 @@ class Linear(Module):
 
     def forward(self, x):
         return x.dot(self.weights.vals) + self.bias.vals
+
+class ReLU(Module):
+    def __init__(self):
+        super(ReLU, self).__init__()
+
+    def forward(self, x):
+        return np.where(x > 0, x, 0)
 
 def MSELoss(output, target):
     loss = np.mean(np.power(output - target, 2))
